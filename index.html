@@ -137,6 +137,17 @@
     border-radius: 10px; padding: 10px 12px;
   }
   .field textarea { min-height: 70px; resize: vertical; }
+  .url-row { display: flex; gap: 6px; }
+  .url-row input { flex: 1; min-width: 0; }
+  .fetch-btn {
+    flex: 0 0 auto; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);
+    border-radius: 10px; padding: 0 12px; font-size: .9rem; font-weight: 700; cursor: pointer;
+  }
+  .fetch-btn:disabled { opacity: .6; cursor: wait; }
+  .hint { font-size: .78rem; color: var(--sub); margin-top: 4px; }
+  .hint.err { color: var(--danger); }
+  .summary { margin-top: 8px; font-size: .86rem; color: var(--sub); word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .seg { display: flex; flex-wrap: wrap; gap: 6px; }
   .seg button {
     border: 1px solid var(--line); background: var(--bg); color: var(--text);
@@ -199,11 +210,19 @@
     </div>
     <div class="field">
       <label for="fUrl">URL（あれば）</label>
-      <input id="fUrl" type="url" inputmode="url" placeholder="https://...">
+      <div class="url-row">
+        <input id="fUrl" type="url" inputmode="url" placeholder="https://...">
+        <button type="button" class="fetch-btn" id="fetchBtn">✨ 自動入力</button>
+      </div>
+      <div class="hint" id="fetchHint">URLを貼り付けて「自動入力」を押すと、タイトルと説明文が入ります（このときだけURLが外部サービス Microlink に送られます）</div>
     </div>
     <div class="field">
       <label for="fAuthor">著者・サイト名（あれば）</label>
       <input id="fAuthor">
+    </div>
+    <div class="field">
+      <label for="fSummary">説明（サイトの紹介文）</label>
+      <textarea id="fSummary" placeholder="自動入力するとここに入ります。自分で書いてもOK"></textarea>
     </div>
     <div class="field">
       <label>ステータス</label>
@@ -310,7 +329,7 @@ function render() {
   const list = items
     .filter(i => currentTab === 'all' || i.status === currentTab)
     .filter(i => !tf || i.type === tf)
-    .filter(i => !q || [i.title, i.author, i.memo, i.url].join(' ').toLowerCase().includes(q))
+    .filter(i => !q || [i.title, i.author, i.memo, i.summary, i.url].join(' ').toLowerCase().includes(q))
     .sort((a, b) => b.addedAt - a.addedAt);
 
   const el = document.getElementById('list');
@@ -342,6 +361,7 @@ function render() {
             <div class="meta">${metaParts.join(' ・ ')}</div>
           </div>
         </div>
+        ${it.summary ? `<div class="summary">${esc(it.summary)}</div>` : ''}
         ${it.memo ? `<div class="memo">${esc(it.memo)}</div>` : ''}
         <div class="card-bottom">
           <span class="added">🕒 ${dayLabel(d)} ${timeLabel(d)} に追加${it.status === 'done' && it.doneAt ? `<br>✅ ${dayLabel(new Date(it.doneAt))} に読了` : ''}</span>
@@ -377,6 +397,8 @@ function openForm(id = null) {
   document.getElementById('fUrl').value = it?.url || '';
   document.getElementById('fAuthor').value = it?.author || '';
   document.getElementById('fMemo').value = it?.memo || '';
+  document.getElementById('fSummary').value = it?.summary || '';
+  setHint(DEFAULT_HINT);
   formType = it?.type || 'book';
   formStatus = it?.status || 'want';
   renderSeg('typeSeg', TYPES, formType, v => formType = v);
@@ -399,6 +421,7 @@ document.getElementById('form').addEventListener('submit', e => {
     url: document.getElementById('fUrl').value.trim(),
     author: document.getElementById('fAuthor').value.trim(),
     memo: document.getElementById('fMemo').value.trim(),
+    summary: document.getElementById('fSummary').value.trim(),
     type: formType,
   };
   if (editingId) {
@@ -415,6 +438,41 @@ document.getElementById('form').addEventListener('submit', e => {
   save(); render();
   document.getElementById('formDlg').close();
 });
+// ---- URLから自動入力（Microlink） ----
+const DEFAULT_HINT = document.getElementById('fetchHint').textContent;
+function setHint(msg, isErr = false) {
+  const h = document.getElementById('fetchHint');
+  h.textContent = msg; h.classList.toggle('err', isErr);
+}
+document.getElementById('fetchBtn').onclick = async () => {
+  const urlEl = document.getElementById('fUrl');
+  let raw = urlEl.value.trim();
+  if (raw && !/^https?:\/\//i.test(raw)) raw = 'https://' + raw;
+  const url = /\s/.test(raw) ? '' : safeUrl(raw);
+  if (!url || !new URL(url).hostname.includes('.')) { setHint('先に正しいURL（https://〜）を入れてください', true); return; }
+  urlEl.value = url;
+  const btn = document.getElementById('fetchBtn');
+  btn.disabled = true; btn.textContent = '読み込み中…';
+  setHint('ページの情報を取得しています…');
+  try {
+    const res = await fetch('https://api.microlink.io/?url=' + encodeURIComponent(url));
+    const json = await res.json();
+    if (json.status !== 'success' || !json.data) throw new Error(`${res.status} ${json.code || ''} ${json.message || 'failed'}`);
+    const d = json.data;
+    const fill = (id, v) => { const el = document.getElementById(id); if (v && !el.value.trim()) el.value = v; };
+    fill('fTitle', d.title);
+    fill('fAuthor', d.publisher || d.author);
+    fill('fSummary', d.description);
+    if (formType === 'book') { formType = 'web'; renderSeg('typeSeg', TYPES, formType, v => formType = v); }
+    setHint(d.title || d.description ? '自動入力しました（すでに入っていた欄はそのままです）' : 'このページからは情報を取れませんでした。手で入力してください', !(d.title || d.description));
+  } catch (err) {
+    setHint(res429(err) ? '混み合っています。少し待ってからもう一度押してください' : '情報を取れませんでした。手で入力してください', true);
+  } finally {
+    btn.disabled = false; btn.textContent = '✨ 自動入力';
+  }
+};
+function res429(err) { return /rate|limit|429/i.test(String(err && err.message)); }
+
 document.getElementById('cancelBtn').onclick = () => document.getElementById('formDlg').close();
 document.getElementById('deleteBtn').onclick = () => {
   const it = items.find(i => i.id === editingId);
